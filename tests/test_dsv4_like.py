@@ -148,3 +148,33 @@ def test_fp4_expert_merge(tmp_path):
     # fp4 is coarse: check the merge lands near the average in aggregate
     assert float((got - avg).norm() / avg.norm()) < 0.25
     assert m.info["hc_head_fn"].dtype == "F32" and m.info["embed.weight"].dtype == "BF16"
+
+
+def test_overlay_of_partial_checkpoint_writes_upstream_index(tmp_path, monkeypatch):
+    """A partial checkpoint (as `kessel fetch` writes it) -> the overlay's index is the upstream's full index with
+    only the edited tensors repointed, plus kessel_upstream.json for `kessel materialize`."""
+    from kessel import overlay
+    from kessel.ops import Direction
+
+    full = tmp_path / "full"
+    _write_model(full, 0)
+    upstream_wm = json.loads((full / "model.safetensors.index.json").read_text())["weight_map"]
+    # partial = only layer 1's wo_b (+scale), like `kessel fetch --filter`
+    part = tmp_path / "part"
+    part.mkdir()
+    mf = ModelFiles(full)
+    keep = ["layers.1.attn.wo_b.weight", "layers.1.attn.wo_b.scale"]
+    write_safetensors(part / "kessel-partial.safetensors",
+                      [(n, mf.info[n].dtype, mf.info[n].shape, mf.raw(n)) for n in keep])
+    (part / "model.safetensors.index.json").write_text(json.dumps(
+        {"metadata": {"partial_of": "org/model@abc123"}, "weight_map": {n: "kessel-partial.safetensors" for n in keep}}))
+    monkeypatch.setattr(overlay, "upstream_weight_map", lambda repo, rev: dict(upstream_wm))
+
+    r = torch.nn.functional.normalize(torch.randn(256), dim=0)
+    apply_directions(str(part), [Direction(keep[0], r, "output", 1.0, 1.0)], tmp_path / "out")
+    wm = json.loads((tmp_path / "out" / "model.safetensors.index.json").read_text())["weight_map"]
+    assert set(wm) == set(upstream_wm)
+    assert {n for n, f in wm.items() if f != upstream_wm[n]} == set(keep)
+    up = json.loads((tmp_path / "out" / "kessel_upstream.json").read_text())
+    assert up["partial_of"] == "org/model@abc123"
+    assert not any(p.is_symlink() for p in (tmp_path / "out").iterdir())

@@ -1,4 +1,4 @@
-"""kessel CLI: merge | diff | directions extract | directions apply | fetch."""
+"""kessel CLI: merge | diff | directions extract | directions apply | fetch | materialize."""
 
 from __future__ import annotations
 
@@ -59,6 +59,13 @@ def _fetch(a):
     print(json.dumps(fetch(a.repo, a.filter, a.out, revision=a.revision), indent=1))
 
 
+def _materialize(a):
+    from .overlay import materialize
+
+    got = materialize(a.out)
+    print(f"downloaded {len(got)} upstream shards into {a.out}")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="kessel", description="Model merging, by tensor name.")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -108,6 +115,10 @@ def main(argv=None):
     f.add_argument("--filter", required=True, help="regex on tensor names (scales come along)")
     f.add_argument("--revision")
     f.set_defaults(fn=_fetch)
+
+    mt = sub.add_parser("materialize", help="download the upstream shards an overlay of a fetched checkpoint needs")
+    mt.add_argument("out")
+    mt.set_defaults(fn=_materialize)
 
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, format="%(levelname)s %(message)s")

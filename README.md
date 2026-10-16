@@ -20,7 +20,8 @@ There are no architecture files.
 ## Install
 
 ```bash
-pip install -e .            # torch, safetensors, pyyaml, huggingface_hub, tqdm
+pip install kessel-merge    # imports as `kessel`; the CLI is `kessel`
+pip install -e .            # from a checkout: torch, safetensors, pyyaml, huggingface_hub, tqdm
 pip install -e ".[dev]"     # + pytest, ruff, transformers, peft (tests)
 ```
 
@@ -102,6 +103,20 @@ kessel fetch deepseek-ai/DeepSeek-V4-Flash-0731 ./wo_b --filter '\.attn\.wo_b\.w
 Downloads only the matching tensors and their scales, using HTTP range requests against the safetensors headers. The
 output directory is a normal checkpoint that every other command accepts. Use it when an edit touches a few tensors
 of a huge model. The repo's index decides which shard holds each tensor, so overlay repos come out right.
+
+An overlay built from a fetched checkpoint (`kessel merge --overlay` or `kessel directions apply`) gets the
+upstream repo's full index, with only the changed tensors pointing at the new shard, plus `kessel_upstream.json`.
+`kessel materialize ./out` then downloads the untouched upstream shards next to it, which makes it a complete,
+loadable checkpoint. For example, re-baking an abliteration onto a finetune of a 160 GB model:
+
+```bash
+kessel fetch org/base           base_wob  --filter '\.attn\.wo_b\.weight$'
+kessel fetch org/base-abliterated abl_wob --filter '\.attn\.wo_b\.weight$'
+kessel fetch org/finetune       ft_wob    --filter '\.attn\.wo_b\.weight$'
+kessel directions extract base_wob abl_wob -o dirs.safetensors
+kessel directions apply ft_wob dirs.safetensors ./finetune-abliterated --lam 2.5
+kessel materialize ./finetune-abliterated     # when you want to load it
+```
 
 ## Python
 

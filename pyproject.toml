@@ -1,13 +1,14 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "kessel"
+name = "kessel-merge"
 dynamic = ["version"]
 description = "Model merging by tensor name: mergekit-compatible configs, FP8/FP4 checkpoints, rank-1 edits"
 readme = "README.md"
-license = { file = "LICENSE.md" }
+license = "MIT"
+license-files = ["LICENSE.md"]
 requires-python = ">=3.10"
 dependencies = ["torch>=2.4", "safetensors>=0.4", "pyyaml", "huggingface_hub", "tqdm"]
 

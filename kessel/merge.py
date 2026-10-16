@@ -393,26 +393,11 @@ def run(cfg: MergeConfig | str | Path | dict, out: str | Path, device: str = "cp
 
     written = writer.finish()
     if overlay:
-        _finish_overlay(ref_model, out, written, linked)
+        from .overlay import finish
+
+        finish(ref_model.path, out, written, linked)
     _write_metadata(p, out, cfg)
     return rep
-
-
-def _finish_overlay(ref: Model, out: Path, written: dict[str, str], linked: dict[str, str]):
-    import os
-
-    for fname in sorted(set(linked.values())):
-        dst = out / fname
-        if dst.exists() or dst.is_symlink():
-            dst.unlink()
-        dst.symlink_to(os.path.relpath((ref.path / fname).resolve(), out.resolve()))
-    wm = {**linked, **written}
-    total = sum((out / f).stat().st_size for f in set(wm.values()))
-    (out / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {"total_size": total}, "weight_map": dict(sorted(wm.items()))}, indent=2) + "\n")
-    idx = out / "kessel-overlay.safetensors.index.json"
-    if idx.exists():
-        idx.unlink()
 
 
 def _set_layer_count(cfg: dict, n_old: int, n_new: int, layer_map: list[int]):

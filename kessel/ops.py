@@ -10,7 +10,6 @@ lam = 1 removes the direction exactly; lam > 1 over-projects (inverts it).
 from __future__ import annotations
 
 import json
-import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -204,18 +203,9 @@ def apply_directions(model: str | Model, dirs: list[Direction], out: str | Path,
             writer.add_raw(n, ti.dtype, ti.shape, M.files.raw(n))
     written = writer.finish()
     if overlay:
-        for fname in sorted(set(linked.values())):
-            dst = out / fname
-            if dst.exists() or dst.is_symlink():
-                dst.unlink()
-            dst.symlink_to(os.path.relpath((M.path / fname).resolve(), out.resolve()))
-        wm = {**linked, **written}
-        total = sum((out / f).stat().st_size for f in set(wm.values()))
-        (out / "model.safetensors.index.json").write_text(
-            json.dumps({"metadata": {"total_size": total}, "weight_map": dict(sorted(wm.items()))}, indent=2) + "\n")
-        stray = out / "kessel-overlay.safetensors.index.json"
-        if stray.exists():
-            stray.unlink()
+        from .overlay import finish
+
+        finish(M.path, out, written, linked)
     for f in M.path.iterdir():
         if f.is_file() and f.suffix in SIDE_FILES and f.name != "model.safetensors.index.json" \
                 and not (out / f.name).exists():
