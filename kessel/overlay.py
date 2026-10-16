@@ -156,9 +156,11 @@ def flatten(src: str | Path, out: str | Path | None = None, in_place: bool = Fal
     if not in_place:
         for p in src.iterdir():
             if p.is_file() and p.suffix in {".json", ".jinja", ".model", ".txt", ".tiktoken"} \
-                    and p.name not in ("model.safetensors.index.json",) and not (out / p.name).exists():
+                    and p.name not in ("model.safetensors.index.json", UPSTREAM_FILE) and not (out / p.name).exists():
                 shutil.copy(p, out / p.name)
     else:
         for f in overlay_files:
             (out / f).unlink()
+        if (out / UPSTREAM_FILE).exists():
+            (out / UPSTREAM_FILE).unlink()
     return {"patched_tensors": sum(len(v) for v in patches.values()), "shards_patched": len(patches)}
