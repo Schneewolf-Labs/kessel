@@ -178,3 +178,24 @@ def test_overlay_of_partial_checkpoint_writes_upstream_index(tmp_path, monkeypat
     up = json.loads((tmp_path / "out" / "kessel_upstream.json").read_text())
     assert up["partial_of"] == "org/model@abc123"
     assert not any(p.is_symlink() for p in (tmp_path / "out").iterdir())
+
+
+def test_flatten_overlay(tmp_path):
+    from kessel.ops import Direction
+    from kessel.overlay import flatten
+
+    stock = tmp_path / "stock"
+    _write_model(stock, 0)
+    n = "layers.2.attn.wo_b.weight"
+    r = torch.nn.functional.normalize(torch.randn(256), dim=0)
+    apply_directions(str(stock), [Direction(n, r, "output", 2.5, 1.0)], tmp_path / "ov")
+    flatten(tmp_path / "ov", tmp_path / "flat")
+    ov, fl, st = ModelFiles(tmp_path / "ov"), ModelFiles(tmp_path / "flat"), ModelFiles(stock)
+    assert not any(p.name.startswith("kessel-overlay") for p in (tmp_path / "flat").iterdir())
+    assert set(fl.files) == set(st.files)
+    for name in st.info:
+        assert fl.raw(name) == ov.raw(name), name  # every tensor is the overlay's view
+    # and no shard holds a stale copy: each tensor appears exactly once across the flat shards
+    seen = [t for f in fl.files.values() for t in f.tensors]
+    assert len(seen) == len(set(seen)) == len(st.info)
+    assert fl.raw(n) != st.raw(n)

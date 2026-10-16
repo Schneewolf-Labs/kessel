@@ -1,4 +1,4 @@
-"""kessel CLI: merge | diff | directions extract | directions apply | fetch | materialize."""
+"""kessel CLI: merge | diff | directions extract | directions apply | fetch | materialize | flatten."""
 
 from __future__ import annotations
 
@@ -66,6 +66,12 @@ def _materialize(a):
     print(f"downloaded {len(got)} upstream shards into {a.out}")
 
 
+def _flatten(a):
+    from .overlay import flatten
+
+    print(json.dumps(flatten(a.src, a.out, in_place=a.in_place), indent=1))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="kessel", description="Model merging, by tensor name.")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -119,6 +125,12 @@ def main(argv=None):
     mt = sub.add_parser("materialize", help="download the upstream shards an overlay of a fetched checkpoint needs")
     mt.add_argument("out")
     mt.set_defaults(fn=_materialize)
+
+    fl = sub.add_parser("flatten", help="write an overlay's tensors into the base shards: a plain checkpoint")
+    fl.add_argument("src")
+    fl.add_argument("out", nargs="?")
+    fl.add_argument("--in-place", action="store_true", help="patch the shards in src instead of copying")
+    fl.set_defaults(fn=_flatten)
 
     a = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO if a.verbose else logging.WARNING, format="%(levelname)s %(message)s")

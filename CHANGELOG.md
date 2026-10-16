@@ -13,3 +13,6 @@
 - `--overlay` output: only changed tensors are written, the base's shards are linked.
 - `kessel diff`, `kessel directions extract|apply` (rank-1 edits such as abliteration).
 - `kessel fetch`: download only matching tensors of a Hub repo via range requests.
+- Overlays of fetched (partial) checkpoints carry the upstream's full index; `kessel materialize` downloads the
+  untouched shards; `kessel flatten` writes overlay tensors into the base shards in place (a plain checkpoint any
+  loader reads correctly).

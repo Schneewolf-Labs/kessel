@@ -116,7 +116,14 @@ kessel fetch org/finetune       ft_wob    --filter '\.attn\.wo_b\.weight$'
 kessel directions extract base_wob abl_wob -o dirs.safetensors
 kessel directions apply ft_wob dirs.safetensors ./finetune-abliterated --lam 2.5
 kessel materialize ./finetune-abliterated     # when you want to load it
+kessel flatten ./finetune-abliterated ./finetune-abliterated-flat   # to publish or serve it
 ```
+
+**Serve or publish flattened checkpoints, not overlays.** An overlay's base shards still contain the tensors it
+replaced. Loaders that read only what the index points at (transformers, Kessel) are fine. vLLM, however, reads
+every tensor in every indexed shard, so whichever copy it loads last wins. `kessel flatten` writes each overlay
+tensor into its base shard at the same offset, so every tensor exists exactly once. Unchanged bytes stay
+identical, so an upload to HF's chunk-deduplicating storage only sends the changed chunks.
 
 ## Python
 
