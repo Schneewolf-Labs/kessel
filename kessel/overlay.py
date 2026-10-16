@@ -69,8 +69,10 @@ def finish(src_path: Path, out: Path, written: dict[str, str], linked: dict[str,
         stray.unlink()
 
 
-def materialize(out: str | Path) -> list[str]:
+def materialize(out: str | Path, workers: int = 8) -> list[str]:
     """Download the upstream shards an overlay built from a partial checkpoint still references."""
+    from concurrent.futures import ThreadPoolExecutor
+
     from huggingface_hub import hf_hub_download
 
     out = Path(out)
@@ -79,8 +81,8 @@ def materialize(out: str | Path) -> list[str]:
     up = _split(json.loads((out / UPSTREAM_FILE).read_text())["partial_of"])
     wm = json.loads((out / "model.safetensors.index.json").read_text())["weight_map"]
     need = sorted(f for f in set(wm.values()) if not (out / f).exists())
-    for f in need:
-        hf_hub_download(up[0], f, revision=up[1], local_dir=out)
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        list(ex.map(lambda f: hf_hub_download(up[0], f, revision=up[1], local_dir=out), need))
     return need
 
 
