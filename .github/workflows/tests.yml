@@ -40,8 +40,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # mergekit 0.1.4's pydantic models don't build on current torch; pin the stack it was verified on
       - name: Install dependencies
-        run: pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[dev]" mergekit
+        run: >-
+          pip install --extra-index-url https://download.pytorch.org/whl/cpu
+          torch==2.7.1 transformers==5.3.0 peft==0.18.1 mergekit==0.1.4 -e ".[dev]"
 
       - name: Parity tests
         run: pytest -v tests/test_parity.py tests/test_cli.py
