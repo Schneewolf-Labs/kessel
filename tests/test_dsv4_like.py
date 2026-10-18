@@ -199,3 +199,63 @@ def test_flatten_overlay(tmp_path):
     seen = [t for f in fl.files.values() for t in f.tensors]
     assert len(seen) == len(set(seen)) == len(st.info)
     assert fl.raw(n) != st.raw(n)
+
+
+def _write_lora(path, module_names, shapes, scale, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    items = []
+    for mod, (out_f, in_f) in zip(module_names, shapes):
+        a = torch.randn(4, in_f, generator=g)
+        b = torch.randn(out_f, 4, generator=g) * scale
+        for kind, t in (("lora_A", a), ("lora_B", b)):
+            data, dt = tensor_to_bytes(t)
+            items.append((f"base_model.model.{mod}.{kind}.weight", dt, tuple(t.shape), data))
+    path.mkdir(parents=True, exist_ok=True)
+    write_safetensors(path / "adapter_model.safetensors", items)
+    (path / "adapter_config.json").write_text(json.dumps({"r": 4, "lora_alpha": 4, "target_modules": ["wq_a"]}))
+
+
+def test_promote_changed_keeps_small_lora_delta(tmp_path):
+    """A LoRA delta far below FP8's step (~0.1% of the weight): requantizing erases it; --promote-changed writes the
+    touched weights as bf16, which keeps much of it, drops their scales and lists them as unquantized."""
+    base = _write_model(tmp_path / "base", 0)
+    mods = [f"layers.{i}.attn.wq_a" for i in range(LAYERS)]
+    _write_lora(tmp_path / "lora", mods, [(128, 256)] * LAYERS, scale=1e-5)
+    cfg = {"models": [{"model": f"{tmp_path / 'base'}+{tmp_path / 'lora'}", "parameters": {"weight": 1.0}}],
+           "merge_method": "task_arithmetic", "base_model": str(tmp_path / "base"), "dtype": "bfloat16"}
+    (tmp_path / "base" / "config.json").write_text(json.dumps(
+        {"num_hidden_layers": LAYERS, "model_type": "deepseek_v4",
+         "quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}))
+    mf_base = ModelFiles(tmp_path / "base")
+    lora = __import__("kessel.lora", fromlist=["LoraAdapter"]).LoraAdapter(str(tmp_path / "lora"))
+    w = _dense(mf_base, "layers.1.attn.wq_a.weight")
+    a = lora._tensor("base_model.model.layers.1.attn.wq_a.lora_A.weight")
+    b = lora._tensor("base_model.model.layers.1.attn.wq_a.lora_B.weight")
+    delta = b @ a
+
+    req = tmp_path / "requant"
+    run(cfg, req, progress=False)
+    got_req = _dense(ModelFiles(req), "layers.1.attn.wq_a.weight") - w
+
+    out = tmp_path / "promoted"
+    rep = run(cfg, out, overlay=True, progress=False, promote_changed=True)
+    mf = ModelFiles(out)
+    assert sorted(rep.promoted) == sorted(m + ".weight" for m in mods)
+    for m in mods:
+        assert mf.info[m + ".weight"].dtype == "BF16"
+        assert m + ".scale" not in mf.info
+    # untouched quantized tensors keep their bytes and scales
+    assert mf.info["layers.1.attn.wo_b.weight"].dtype == "F8_E4M3" and "layers.1.attn.wo_b.scale" in mf.info
+    assert mf.raw("layers.1.attn.wo_b.weight") == mf_base.raw("layers.1.attn.wo_b.weight")
+    qc = json.loads((out / "config.json").read_text())["quantization_config"]
+    assert qc["ignored_layers"] == sorted(mods) and qc["modules_to_not_convert"] == sorted(mods)
+
+    got = mf.tensor("layers.1.attn.wq_a.weight").float() - w
+    cos = torch.nn.functional.cosine_similarity
+    assert (delta.norm() / w.norm()) < 2e-3
+    assert cos(got.flatten(), delta.flatten(), 0) > 0.5       # bf16 keeps much of it
+    assert cos(got_req.flatten(), delta.flatten(), 0) < 0.3   # FP8 requantization erases most of it
+    assert torch.equal(got, (w + delta).bfloat16().float() - w)
+    assert (out / "model.safetensors.index.json").exists()
+    assert base["layers.1.attn.wq_a.weight"].dtype == torch.float8_e4m3fn
+
