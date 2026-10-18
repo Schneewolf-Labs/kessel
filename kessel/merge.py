@@ -273,6 +273,7 @@ class Report:
     unchanged_after_compute: int = 0
     requant: Q.RequantStats = field(default_factory=Q.RequantStats)
     changed: list[str] = field(default_factory=list)
+    promoted: list[str] = field(default_factory=list)  # quantized weights written unquantized (promote_changed)
 
 
 def _rename_companion(out_name: str, ref_name: str, scale_name: str) -> str:
@@ -284,9 +285,16 @@ def _rename_companion(out_name: str, ref_name: str, scale_name: str) -> str:
 
 
 def run(cfg: MergeConfig | str | Path | dict, out: str | Path, device: str = "cpu", overlay: bool = False,
-        max_shard_bytes: int = 5 * 1024**3, keep_quantized: bool = True, progress: bool = True) -> Report:
+        max_shard_bytes: int = 5 * 1024**3, keep_quantized: bool = True, progress: bool = True,
+        promote_changed: bool = False) -> Report:
+    """`promote_changed`: quantized weights the merge changes are written as bfloat16 (scale dropped, listed as
+    unquantized in config.json) instead of requantized; untouched quantized weights keep their bytes. Use it when
+    the change is smaller than the format's step: a LoRA delta of ~0.1% of a weight is almost entirely rounded
+    away by FP8 e4m3 (~6% steps), while bf16 keeps a good part of it (FP8 values are exact in bf16)."""
     if not isinstance(cfg, MergeConfig):
         cfg = parse(cfg)
+    if promote_changed and not keep_quantized:
+        raise ValueError("promote_changed and dequantize are exclusive")
     out = Path(out)
     p = plan(cfg)
     ref_model = p.models[p.ref_model]
@@ -362,6 +370,19 @@ def run(cfg: MergeConfig | str | Path | dict, out: str | Path, device: str = "cp
         res = p.method.fn(mi).float()
         del dense, mi
         rep.computed += 1
+        if keep_q and promote_changed:
+            orig = Q.dequantize(rm.files.tensor(ot.ref.name).to(device), rm.files.tensor(spec.scale_name).to(device),
+                                spec)
+            if torch.equal(res, orig.float()):  # the merge left the stored weight exactly as it was
+                rep.unchanged_after_compute += 1
+                emit_raw(rm, ot.ref.name)
+                continue
+            res_t = res.to(torch.bfloat16).cpu()
+            data, _ = tensor_to_bytes(res_t)
+            writer.add_raw(ot.name, "BF16", tuple(res_t.shape), data)
+            rep.promoted.append(ot.name)
+            rep.changed.append(ot.name)
+            continue
         if keep_q:
             logical = rinfo.shape if spec.kind == "fp8" else (rinfo.shape[0], rinfo.shape[1] * 2)
             if tuple(res.shape) != tuple(logical):
@@ -396,7 +417,7 @@ def run(cfg: MergeConfig | str | Path | dict, out: str | Path, device: str = "cp
         from .overlay import finish
 
         finish(ref_model.path, out, written, linked)
-    _write_metadata(p, out, cfg)
+    _write_metadata(p, out, cfg, rep.promoted)
     return rep
 
 
@@ -411,7 +432,7 @@ def _set_layer_count(cfg: dict, n_old: int, n_new: int, layer_map: list[int]):
             _set_layer_count(v, n_old, n_new, layer_map)
 
 
-def _write_metadata(p: Plan, out: Path, cfg: MergeConfig):
+def _write_metadata(p: Plan, out: Path, cfg: MergeConfig, promoted: list[str] = ()):
     ref = p.models[p.ref_model]
     mcfg = ref.files.config()
     if mcfg:
@@ -421,6 +442,13 @@ def _write_metadata(p: Plan, out: Path, cfg: MergeConfig):
             # transformers >= 4.56 writes `dtype`; older configs carry `torch_dtype`
             key = "dtype" if "dtype" in mcfg or "torch_dtype" not in mcfg else "torch_dtype"
             mcfg[key] = cfg.out_dtype or cfg.dtype
+        qc = mcfg.get("quantization_config")
+        if promoted and isinstance(qc, dict):
+            # module names (checkpoint naming) that now hold plain bf16 weights; vLLM's Fp8Config reads
+            # `ignored_layers`, transformers' fine-grained FP8 reads `modules_to_not_convert`
+            mods = sorted(n[: -len(".weight")] for n in promoted)
+            for k in ("ignored_layers", "modules_to_not_convert"):
+                qc[k] = sorted(set(qc.get(k) or []) | set(mods))
         (out / "config.json").write_text(json.dumps(mcfg, indent=2) + "\n")
     donor = ref
     if cfg.tokenizer_source and cfg.tokenizer_source != "base":

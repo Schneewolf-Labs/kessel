@@ -12,7 +12,8 @@ def _merge(a):
     from .merge import run
 
     rep = run(a.config, a.out, device=a.device, overlay=a.overlay, max_shard_bytes=int(a.shard_gb * 1024**3),
-              keep_quantized=not a.dequantize, progress=not a.quiet)
+              keep_quantized=not a.dequantize, progress=not a.quiet,
+              promote_changed=a.promote_changed)
     print(json.dumps({"tensors": rep.tensors, "copied": rep.copied, "computed": rep.computed,
                       "unchanged_after_compute": rep.unchanged_after_compute,
                       "requant_blocks_rescaled": rep.requant.blocks_rescaled,
@@ -84,6 +85,9 @@ def main(argv=None):
     m.add_argument("--overlay", action="store_true",
                    help="write only tensors that differ from the base; symlink the base's shards")
     m.add_argument("--dequantize", action="store_true", help="write FP8/FP4 weights as dtype instead of requantizing")
+    m.add_argument("--promote-changed", action="store_true",
+                   help="write quantized weights the merge changes as bf16 (listed as unquantized in config.json) "
+                        "instead of requantizing; for changes below the format's step, e.g. LoRA deltas on FP8")
     m.add_argument("--shard-gb", type=float, default=5.0)
     m.add_argument("--quiet", action="store_true")
     m.set_defaults(fn=_merge)

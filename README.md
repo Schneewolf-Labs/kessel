@@ -62,6 +62,11 @@ merge gives the same model.
   get their original byte back, so an untouched tensor stays byte-identical and a small edit only changes the bytes
   it moved.
 - `--dequantize` writes plain `dtype` tensors instead.
+- `--promote-changed` writes only the quantized weights the merge changed as bf16, drops their scales and lists
+  them in `quantization_config` (`ignored_layers` for vLLM, `modules_to_not_convert` for transformers, in
+  checkpoint naming). Everything untouched stays quantized. Use it for changes smaller than the format's step: a
+  LoRA delta of ~0.1% of a weight is almost entirely rounded away by FP8 e4m3 (steps of ~6%), while bf16 keeps much
+  of it.
 
 **`--overlay`** writes only the tensors that differ from the base model. The base's shards are symlinked and a new
 index points at both. A merge or edit that touches 1.5 GB of a 160 GB checkpoint therefore costs 1.5 GB.
