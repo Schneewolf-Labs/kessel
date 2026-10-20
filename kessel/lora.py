@@ -17,6 +17,10 @@ ADAPTER_ALLOW = ["adapter_config.json", "adapter_model.safetensors"]
 _LORA_KEY = re.compile(r"^(?P<module>.+?)\.(?P<kind>lora_A|lora_B|lora_embedding_A|lora_embedding_B)(?:\.[^.]+)?\.?(?:weight)?$")
 
 
+# tensor groups beside the language model that reuse its module names
+SIDE_TOWERS = ("mtp", "visual", "vision_tower", "vision_model")
+
+
 @dataclass
 class _Pair:
     module: str
@@ -88,6 +92,10 @@ class LoraAdapter:
             parts = stem.split(".")
             for i in range(len(parts)):
                 hits = by_suffix.get(".".join(parts[i:]), [])
+                if len(hits) > 1:
+                    # a text-only adapter's `layers.0...` also names the MTP head's `mtp.layers.0...`
+                    # (Qwen3.5/3.8); unless the adapter names the side tower, take the main stack
+                    hits = [h for h in hits if not any(f"{a}." in h and f"{a}." not in stem for a in SIDE_TOWERS)]
                 if len(hits) == 1:
                     return hits[0]
                 if len(hits) > 1:
