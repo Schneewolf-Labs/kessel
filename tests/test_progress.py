@@ -10,3 +10,13 @@ def test_progress_callback_counts_every_output_tensor(tiny, tmp_path):
     n = len(ModelFiles(tiny["base"]).names())
     assert rep.tensors == n
     assert calls == [(i, n) for i in range(n + 1)]
+
+
+def test_missing_local_path_says_so(tmp_path):
+    import pytest
+
+    from kessel.io import resolve
+
+    for missing in (str(tmp_path / "nope"), "./nope", "~/nope-kessel", "a/b/c"):
+        with pytest.raises(FileNotFoundError, match="model not found"):
+            resolve(missing)
