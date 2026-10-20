@@ -212,6 +212,9 @@ def resolve(path_or_repo: str, revision: str | None = None, allow: list[str] | N
     p = Path(os.path.expanduser(path_or_repo))
     if p.exists():
         return p
+    if path_or_repo.startswith(("/", "./", "../", "~")) or path_or_repo.count("/") > 1:
+        # a path, not a Hub id: say so instead of the Hub client's "Repo id must be in the form ..."
+        raise FileNotFoundError(f"model not found: {path_or_repo} (no such directory, and not a Hub repo id)")
     from huggingface_hub import snapshot_download
 
     return Path(snapshot_download(path_or_repo, revision=revision, allow_patterns=allow or HF_ALLOW))
