@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -284,13 +285,24 @@ def _rename_companion(out_name: str, ref_name: str, scale_name: str) -> str:
     return stem_out + scale_name[len(stem_in):]
 
 
+def _reporting(items: list, report: Callable[[int, int], None]):
+    """Yield items, calling report(done, total) once up front and again after the caller finishes each one."""
+    report(0, len(items))
+    for i, x in enumerate(items):
+        yield x
+        report(i + 1, len(items))
+
+
 def run(cfg: MergeConfig | str | Path | dict, out: str | Path, device: str = "cpu", overlay: bool = False,
-        max_shard_bytes: int = 5 * 1024**3, keep_quantized: bool = True, progress: bool = True,
-        promote_changed: bool = False) -> Report:
+        max_shard_bytes: int = 5 * 1024**3, keep_quantized: bool = True,
+        progress: bool | Callable[[int, int], None] = True, promote_changed: bool = False) -> Report:
     """`promote_changed`: quantized weights the merge changes are written as bfloat16 (scale dropped, listed as
     unquantized in config.json) instead of requantized; untouched quantized weights keep their bytes. Use it when
     the change is smaller than the format's step: a LoRA delta of ~0.1% of a weight is almost entirely rounded
-    away by FP8 e4m3 (~6% steps), while bf16 keeps a good part of it (FP8 values are exact in bf16)."""
+    away by FP8 e4m3 (~6% steps), while bf16 keeps a good part of it (FP8 values are exact in bf16).
+
+    `progress`: True shows a tqdm bar; a callable is called as `progress(done, total)` after each output tensor
+    (and once with 0 before the first), for callers that report progress themselves."""
     if not isinstance(cfg, MergeConfig):
         cfg = parse(cfg)
     if promote_changed and not keep_quantized:
@@ -307,7 +319,9 @@ def run(cfg: MergeConfig | str | Path | dict, out: str | Path, device: str = "cp
     linked: dict[str, str] = {}  # overlay: output name -> reference shard file
 
     it = p.tensors
-    if progress:
+    if callable(progress):
+        it = _reporting(it, progress)
+    elif progress:
         try:
             from tqdm import tqdm
             it = tqdm(it, desc="merging", unit="tensor")
