@@ -1,4 +1,5 @@
-"""kessel CLI: merge | diff | directions extract | directions apply | fetch | materialize | flatten."""
+"""kessel CLI: merge | diff | directions extract | directions apply | cvec export | cvec show | fetch | materialize |
+flatten."""
 
 from __future__ import annotations
 
@@ -52,6 +53,47 @@ def _apply(a):
     worst = max(rep.residual.values()) if rep.residual else float("nan")
     print(json.dumps({"edited": len(rep.edited), "requant_blocks_rescaled": rep.requant.blocks_rescaled,
                       "requant_bytes_changed": rep.requant.bytes_changed, "worst_residual": worst}, indent=1))
+
+
+def _layer_range(spec):
+    if not spec:
+        return None
+    out = set()
+    for part in spec.split(","):
+        lo, _, hi = part.partition("-")
+        out.update(range(int(lo), int(hi or lo) + 1))
+    return out
+
+
+def _cvec_export(a):
+    import torch
+
+    from .cvec import save_control_vector
+
+    if a.vectors.endswith(".safetensors"):
+        from safetensors.torch import load_file
+
+        obj = load_file(a.vectors)
+    else:
+        obj = torch.load(a.vectors, map_location="cpu", weights_only=True)
+    if isinstance(obj, dict) and a.key:
+        obj = obj[a.key]
+    elif isinstance(obj, dict) and not all(str(k).lstrip("-").isdigit() for k in obj):
+        raise SystemExit(f"{a.vectors} holds {sorted(obj)[:5]}; pick one with --key")
+    if isinstance(obj, dict):
+        obj = {int(k): v for k, v in obj.items()}
+    written = save_control_vector(obj, a.out, scale=a.scale, layers=_layer_range(a.layers), hf_index=a.hf_index,
+                                  model_hint=a.model_hint)
+    print(json.dumps({"out": a.out, "llama_cpp_layers": written, "scale": a.scale}))
+
+
+def _cvec_show(a):
+    from .cvec import load_control_vector
+
+    vecs, meta = load_control_vector(a.file)
+    print(f"# model_hint={meta.get('controlvector.model_hint', '')!r} layers={len(vecs)}")
+    for k, v in vecs.items():
+        print(f"direction.{k}	n_embd={v.numel()}	norm={float(v.norm()):.4f}")
 
 
 def _fetch(a):
@@ -118,6 +160,22 @@ def main(argv=None):
     p.add_argument("--device", default="cpu")
     p.add_argument("--full-copy", action="store_true", help="write every tensor instead of an overlay")
     p.set_defaults(fn=_apply)
+
+    cv = sub.add_parser("cvec", help="llama.cpp control vectors (activation steering)")
+    cvs = cv.add_subparsers(dest="ccmd", required=True)
+    x = cvs.add_parser("export", help="write per-layer vectors as a llama.cpp control vector GGUF")
+    x.add_argument("vectors", help=".safetensors or .pt: a [n_layers, d] tensor or {layer: vector}, or a dict of those")
+    x.add_argument("out")
+    x.add_argument("--key", help="which entry of a dict of vector sets to export")
+    x.add_argument("--layers", help="layers to keep, in the vectors' own indexing, e.g. 12-20 or 4,8-10")
+    x.add_argument("--hf-index", action="store_true",
+                   help="vectors are indexed like HF hidden_states (index j = output of layer j-1)")
+    x.add_argument("--scale", type=float, default=1.0, help="multiply the vectors before writing")
+    x.add_argument("--model-hint", default="", help="architecture name stored in the file, e.g. qwen35")
+    x.set_defaults(fn=_cvec_export)
+    sh = cvs.add_parser("show", help="list a control vector's layers and norms")
+    sh.add_argument("file")
+    sh.set_defaults(fn=_cvec_show)
 
     f = sub.add_parser("fetch", help="download only the tensors matching a regex from a Hub repo (range requests)")
     f.add_argument("repo")

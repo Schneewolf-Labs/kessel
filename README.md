@@ -99,6 +99,26 @@ The two projection forms (`W` is `[out, in]`, `r` a unit vector):
 `lam = 1` removes the direction exactly. A larger `lam` over-projects. `apply` reports `|rᵀW'| / |rᵀW|` per tensor,
 which should land near `|1 - lam|`. On FP8 weights, part of a small edit rounds away, so check that number.
 
+## Control vectors
+
+A rank-1 edit changes weights. A control vector leaves them alone and adds a vector to the residual stream after
+chosen layers while the model runs. llama.cpp loads one with `--control-vector-scaled FILE:S`, and the strength `S`
+can be changed per launch without rebuilding a checkpoint.
+
+```bash
+# vectors measured on HF hidden_states (index j = output of decoder layer j-1), layers 12-20 of a [33, d] tensor
+kessel cvec export dirs.pt search.gguf --key search --layers 12-20 --hf-index --model-hint qwen35
+kessel cvec show search.gguf
+llama-server -m model.gguf --control-vector-scaled search.gguf:0.3
+```
+
+`kessel.mean_difference(pos, neg)` turns two stacks of hidden states (`[n_examples, n_layers + 1, d]`) into per-layer
+vectors, for example contexts where the model does something minus contexts where it doesn't.
+
+llama.cpp adds `direction.k` after decoder layer `k` (counting from 0) and refuses `direction.0`. Hugging Face's
+`hidden_states[j]` is the output of layer `j - 1`. `--hf-index` shifts the numbering for you; without it, vectors are
+taken to be numbered like llama.cpp's. Writing and reading need no extra dependencies.
+
 ## Partial fetch
 
 ```bash
@@ -138,6 +158,7 @@ import kessel
 report = kessel.run("config.yaml", "./out", device="cuda")
 dirs = kessel.extract_directions("base", "base-abliterated")
 kessel.apply_directions("finetune", dirs, "./out", lam=2.5)
+kessel.save_control_vector(kessel.mean_difference(h_pos, h_neg), "steer.gguf", layers=range(12, 21), hf_index=True)
 
 # a new method is a function over float32 tensors
 from kessel import Method, MergeInput, register
