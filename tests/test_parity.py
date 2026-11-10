@@ -1,8 +1,10 @@
 """Kessel vs mergekit on the same configs (skipped when mergekit isn't installed)."""
 
 import pytest
+import torch
 import yaml
 
+from kessel import methods as M
 from kessel.io import ModelFiles
 from kessel.merge import run
 
@@ -134,6 +136,48 @@ merge_method: arcee_fusion
 base_model: {base}
 dtype: bfloat16
 """,
+    "multislerp": """
+models:
+  - model: {ft1}
+    parameters: {{weight: 0.5}}
+  - model: {ft2}
+    parameters: {{weight: [0.2, 0.9]}}
+  - model: {ft3}
+    parameters: {{weight: 0.3}}
+merge_method: multislerp
+dtype: bfloat16
+""",
+    "multislerp_base": """
+models:
+  - model: {ft1}
+    parameters: {{weight: 0.6}}
+  - model: {ft2}
+    parameters: {{weight: 0.4}}
+merge_method: multislerp
+base_model: {base}
+dtype: bfloat16
+""",
+    "karcher": """
+models:
+  - model: {ft1}
+  - model: {ft2}
+  - model: {ft3}
+merge_method: karcher
+base_model: {base}
+parameters:
+  max_iter: 20
+  tol: 1.0e-6
+dtype: bfloat16
+""",
+    "sce": """
+models:
+  - model: {ft1}
+  - model: {ft2}
+  - model: {ft3}
+merge_method: sce
+base_model: {base}
+dtype: bfloat16
+""",
 }
 
 
@@ -170,5 +214,61 @@ def test_matches_mergekit(name, dtype, tiny, tmp_path):
 
 # bf16: mergekit does the math in bf16, we do fp32 and round once. Thresholding methods (top-k, arcee_fusion's
 # importance cut) flip elements that sit on the threshold; the float32 runs above show the math itself is identical.
+# multislerp/karcher normalize to unit vectors and rescale in bf16 in mergekit, which moves most elements by an ulp.
 TOL = {"arcee_fusion": 5e-2, "ties": 3e-2, "breadcrumbs": 3e-2}
-FRAC = {"arcee_fusion": 0.3, "ties": 3e-2, "breadcrumbs": 3e-2, "model_stock": 5e-2}
+FRAC = {"arcee_fusion": 0.3, "ties": 3e-2, "breadcrumbs": 3e-2, "model_stock": 5e-2, "karcher": 5e-2,
+        "multislerp": 0.5, "multislerp_base": 0.5, "sce": 5e-2}
+
+
+# Paths the end-to-end configs can't reach on the tiny models (mergekit fails or writes a wrong shape there because
+# untouched tensors such as layernorms are identical across models), compared function-to-function on random data.
+def _rand(n, shape=(32, 48), seed=0):
+    g = torch.Generator().manual_seed(seed)
+    base = torch.randn(*shape, generator=g)
+    return base, [base + 0.1 * torch.randn(*shape, generator=g) for _ in range(n)]
+
+
+@pytest.mark.parametrize("topk", [0.3, 0.75, 1.0])
+def test_sce_select_topk_matches_mergekit(topk):
+    from mergekit.merge_methods.sce import sce_merge
+
+    base, ts = _rand(3)
+    mk = sce_merge([t.clone() for t in ts], base.clone(), select_topk=topk)
+    ks = M.sce(M.MergeInput("w", base, ts, [{}] * 3, {"select_topk": topk, "int8_mask": False}))
+    assert torch.equal(mk, ks)
+
+
+def test_sce_select_topk_untouched_tensor_keeps_shape():
+    # mergekit returns a [n, ...] tensor here (sce_mask's k == 0 branch); the right answer is the base
+    base = torch.ones(64)
+    ks = M.sce(M.MergeInput("ln", base, [base.clone()] * 3, [{}] * 3, {"select_topk": 0.4, "int8_mask": False}))
+    assert torch.equal(ks, base)
+
+
+@pytest.mark.parametrize("with_base", [True, False])
+def test_multislerp_three_models_matches_mergekit(with_base):
+    from mergekit.merge_methods.multislerp import multislerp
+
+    base, ts = _rand(3, seed=1)
+    w = [0.5, 0.2, 0.3]
+    mk = multislerp([t.clone() for t in ts], w, base.clone() if with_base else None)
+    ks = M.multislerp(M.MergeInput("w", base if with_base else None, ts, [{"weight": x} for x in w],
+                                   {"normalize_weights": True, "eps": 1e-8}))
+    assert torch.equal(mk, ks)
+
+
+def test_multislerp_untouched_tensor_is_base():
+    # mergekit raises for >2 models when every delta is zero; every model agrees, so the base is the answer
+    base = torch.ones(64)
+    ks = M.multislerp(M.MergeInput("ln", base, [base.clone()] * 3, [{"weight": 1.0}] * 3,
+                                   {"normalize_weights": True, "eps": 1e-8}))
+    assert torch.equal(ks, base)
+
+
+def test_karcher_matches_mergekit():
+    from mergekit.merge_methods.karcher import karcher_merge_tensors
+
+    base, ts = _rand(3, seed=2)
+    mk = karcher_merge_tensors([base.clone()] + [t.clone() for t in ts], [0.25] * 4, max_iter=10, tol=1e-5)
+    ks = M.karcher(M.MergeInput("w", base, ts, [{}] * 3, {"max_iter": 10, "tol": 1e-5}))
+    assert torch.equal(mk, ks)
