@@ -301,6 +301,127 @@ def arcee_fusion(m: MergeInput) -> torch.Tensor:
     return base + (other - base) * (imp >= thr).to(base.dtype)
 
 
+def multislerp(m: MergeInput) -> torch.Tensor:
+    """Barycentric slerp: project onto the unit sphere (of deltas, when there's a base), average in the tangent space
+    at the weighted mean, map back, rescale by the weighted mean norm."""
+    if not m.tensors:
+        return m.base
+    ts = common_submatrix(([m.base] if m.base is not None else []) + list(m.tensors))
+    base, ts = (ts[0], ts[1:]) if m.base is not None else (None, ts)
+    if len(ts) == 1:
+        return ts[0]
+    eps = float(m.globals["eps"])
+    x = torch.stack(ts, dim=0)
+    if base is not None:
+        x = x - base
+    flat = x.view(x.shape[0], -1)
+    w = torch.tensor([float(p["weight"]) for p in m.params], dtype=x.dtype, device=x.device)
+    if m.globals["normalize_weights"]:
+        w = w / w.sum()
+    norms = torch.norm(flat, dim=-1, keepdim=True)
+    units = flat / (norms + eps)
+    mean = (units * w.view(-1, 1)).sum(0)
+    mean_norm = torch.norm(mean)
+    if mean_norm < eps:
+        if x.shape[0] == 2:  # mergekit's fallback: plain weighted sum
+            res = (x[0] * w[0] + x[1] * w[1]).view(x.shape[1:])
+            return res + base if base is not None else res
+        if not bool((norms > 0).any()):
+            # every model equals the base here (mergekit raises); the only sensible answer is the base itself
+            return base if base is not None else torch.zeros_like(ts[0])
+        raise ValueError(f"multislerp: weighted sum of the inputs to {m.name} is zero (antipodal inputs with "
+                         "balancing weights); use different weights")
+    mean = mean / mean_norm
+    dots = (units * mean).sum(-1, keepdim=True)
+    tangent = ((units - dots * mean) * w.view(-1, 1)).sum(0)
+    tn = torch.norm(tangent) + eps
+    res = mean * torch.cos(tn) + tangent * (torch.sin(tn) / tn)
+    res = (res * (norms.squeeze(-1) * w).sum()).view(x.shape[1:])
+    return res + base if base is not None else res
+
+
+def _multislerp_idem(g, ps):
+    return bool(g.get("normalize_weights", True)) or abs(sum(float(p.get("weight", 0)) for p in ps) - 1) < 1e-9
+
+
+def karcher(m: MergeInput) -> torch.Tensor:
+    """Riemannian (Karcher) mean of the unit-normalized tensors, rescaled by their mean norm. Equal weights; the
+    base_model, if any, is just another input (as in mergekit)."""
+    ts = common_submatrix(([m.base] if m.base is not None else []) + list(m.tensors))
+    if len(ts) == 1:
+        return ts[0]
+    max_iter, tol = int(m.globals["max_iter"]), float(m.globals["tol"])
+    alphas = [1.0 / len(ts)] * len(ts)
+    norms, units = [], []
+    for t in ts:
+        n = torch.linalg.norm(t.float())
+        if n.item() == 0.0:
+            norms.append(0.0)
+            units.append(torch.zeros_like(t))
+        else:
+            norms.append(n.item())
+            units.append((t / n).to(t.dtype))
+    valid = [i for i, n in enumerate(norms) if n > tol]
+    if not valid:
+        return torch.zeros_like(ts[0])
+    a_sum = sum(alphas[i] for i in valid)
+    va = [alphas[i] / a_sum for i in valid]
+    vu = [units[i] for i in valid]
+    u = torch.zeros_like(vu[0])
+    for a, ui in zip(va, vu):
+        u += a * ui
+    nu = torch.linalg.norm(u.float()).item()
+    u = vu[0].clone() if nu < tol else (u / nu).to(u.dtype)
+    for _ in range(max_iter):
+        T = torch.zeros_like(u)
+        for a, ui in zip(va, vu):
+            dot = torch.clamp(torch.dot(u.flatten(), ui.flatten()), -1.0, 1.0)
+            theta = torch.arccos(dot)
+            if theta.item() < tol:
+                continue
+            T += a * (theta / torch.sin(theta)) * (ui - dot * u)
+        nT = torch.linalg.norm(T.float())
+        if nT.item() < tol:
+            break
+        u = (torch.cos(nT) * u + torch.sin(nT) * (T / nT)).to(u.dtype)
+        un = torch.linalg.norm(u.float())
+        if un.item() > tol:
+            u = (u / un).to(u.dtype)
+    s = 0.0
+    for a, n in zip(alphas, norms):
+        s += a * n
+    return s * u
+
+
+def sce(m: MergeInput) -> torch.Tensor:
+    """SCE: Select (top-k elements by variance across models), Calculate (per-model weight = mean squared delta),
+    Erase (TIES sign consensus). Per-model weights are ignored, as in mergekit."""
+    if not m.tensors:
+        return m.base
+    base, *ts = common_submatrix([m.base] + list(m.tensors))
+    tv = torch.stack([t - base for t in ts], dim=0)
+    k_frac = float(m.globals["select_topk"])
+    if k_frac < 1:
+        if k_frac <= 0:
+            mask = torch.zeros_like(tv[0])
+        else:
+            var = torch.var(tv, dim=0, unbiased=False)
+            k = int(torch.count_nonzero(var) * k_frac)
+            mask = torch.zeros_like(var)
+            if k:
+                _, idx = torch.topk(var.abs().view(-1), k=k, largest=True)
+                mask.view(-1)[idx] = 1
+        tv = tv * mask.unsqueeze(0)
+    majority = (tv.sum(dim=0) >= 0).to(tv.dtype) * 2 - 1
+    erase = tv.sign() == majority
+    w = torch.mean(tv**2, dim=list(range(1, tv.dim())))
+    wsum = torch.sum(w).item()
+    w = torch.ones_like(w) / w.shape[0] if abs(wsum) < 1e-6 else w / wsum
+    w = w.view(-1, *([1] * (tv.dim() - 1)))
+    ew = w * erase
+    return base + (tv * ew).sum(dim=0) / torch.sum(ew, dim=0).clamp(min=1e-6)
+
+
 def passthrough(m: MergeInput) -> torch.Tensor:
     srcs = ([m.base] if m.base is not None else []) + list(m.tensors)
     if len(srcs) != 1:
@@ -330,6 +451,10 @@ for _m in [
     Method("nearswap", nearswap, True, {"t": REQUIRED}, {}),
     Method("model_stock", model_stock, True, {"filter_wise": False}, {}),
     Method("arcee_fusion", arcee_fusion, True, {}, {}),
+    Method("multislerp", multislerp, False, {"normalize_weights": True, "eps": 1e-8}, {"weight": REQUIRED},
+           _multislerp_idem),
+    Method("karcher", karcher, False, {"max_iter": 10, "tol": 1e-5}, {}),
+    Method("sce", sce, True, {"select_topk": 1.0, "int8_mask": False}, {}),
     Method("passthrough", passthrough, False, {}, {"scale": None},
            lambda g, ps: all(p.get("scale") in (None, 1, 1.0) for p in ps)),
 ]:

@@ -46,8 +46,8 @@ dtype: bfloat16
 ```
 
 **Methods:** `linear`, `task_arithmetic`, `ties`, `dare_ties`, `dare_linear`, `breadcrumbs`, `breadcrumbs_ties`,
-`della`, `della_linear`, `slerp`, `nearswap`, `model_stock`, `arcee_fusion`, `passthrough`. Parameter names and
-defaults are mergekit's.
+`della`, `della_linear`, `sce`, `slerp`, `multislerp`, `karcher`, `nearswap`, `model_stock`, `arcee_fusion`,
+`passthrough`. Parameter names and defaults are mergekit's.
 
 **Parity with mergekit:** with `dtype: float32`, every method is bit-identical to mergekit 0.1.4 on the test models
 (`tests/test_parity.py`). With bf16 the results differ by bf16 rounding, because Kessel does the math in float32 and
@@ -75,8 +75,8 @@ index points at both. A merge or edit that touches 1.5 GB of a 160 GB checkpoint
 `merge_and_unload`. Supported: rsLoRA, rank/alpha patterns, embedding LoRA, `modules_to_save`, and prefix mismatches
 such as `model.layers` vs `model.language_model.layers`. DoRA is not supported.
 
-**Not yet supported:** `tokenizer_source: union` (vocab merging), `modules:` configs, the
-`multislerp`/`karcher`/`sce` methods, and parallel tensor execution.
+**Not yet supported:** `tokenizer_source: union` (vocab merging), `modules:` configs, the `nuslerp` and `ram`
+methods, and parallel tensor execution.
 
 ## Rank-1 edits
 
